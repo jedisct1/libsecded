@@ -1,2 +1,7 @@
 *~
 zig-cache
+*.o
+libsecded.so
+libsecded.so.*
+test
+*.out
