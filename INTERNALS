@@ -1,0 +1,135 @@
+SECDED uses a "distance-4 error-correcting code". The typical choice of
+code is an "extended Hamming code".
+
+libsecded encodes an n-byte array using an extended Hamming code on the
+bottom bit of each byte, in parallel an extended Hamming code on the
+next bit of each byte, etc.
+
+This parallel handling of bits makes the libsecded encoding slightly
+less space-efficient than applying an extended Hamming code to all bits
+together. For example, 256 bytes are encoded as 266 bytes, where they
+could instead be encoded as 258 bytes. However, this space difference is
+minor. Parallel handling of bits has the advantage of avoiding annoying
+data indexing inside the software.
+
+Internally, encode() and decode() and clean() are built from the
+following subroutines:
+
+   * expand() inserts bytes with value 0 into the array at positions
+     well known to simplify encoding and decoding of extended Hamming
+     codes (positions 0, 1, 2, 4, 8, 16, etc.).
+
+   * shrink() removes the extra positions.
+
+   * parity() computes parity bytes for an expanded array, storing them
+     in a separate 64-byte array. Encoding could avoid this 64-byte
+     array by storing results directly into x (and computing overall
+     parity after storing the other bits would skip a logarithmic number
+     of xors in fill()), but a separate parity() function is useful
+     because it is shared with decoding. A smaller array ("bits+1"
+     bytes) would suffice, but 64 bytes are a minor cost.
+
+   * fill() puts parity bytes at the right positions in the expanded
+     array.
+
+   * correct() uses parity bytes to correct and detect errors in an
+     expanded array. The details avoid the variable array indexing that
+     would appear in a conventional Hamming decoder; this is intended to
+     assist in some types of automated verification of software
+     correctness, although this verification has not happened yet.
+
+The Python software follows the same structure, and test2.py includes
+tests of Python against C not just for encode() and decode() and clean()
+but also for the subroutines.
+
+On a Haswell with gcc 7.5, the software runs at
+
+   * 0.82 cycles/byte for encoding a megabyte,
+   * 1.15 cycles/byte for decoding a megabyte, and
+   * 1.02 cycles/byte for cleaning a megabyte.
+
+These speeds seem unlikely to be a problem in applications, but higher
+speeds are possible with more work. The following paragraphs explain
+where the time is going and what can be sped up.
+
+expand() and shrink() involve a logarithmic number of calls to
+memmove(), the total number of bytes being linear in the array size.
+fill() is a logarithmic number of byte copies and xors. The main issues
+are the byte operations in parity() and correct().
+
+The main job of parity() is to compute a logarithmic number of sums of
+halves of the array where indices have specific bits set---
+
+   p[0] = x[1]^x[3]^x[5]^x[7]^x[9]^x[11]^x[13]^x[15]^...
+   p[1] = x[2]^x[3]^x[6]^x[7]^x[10]^x[11]^x[14]^x[15]^...
+   p[1] = x[4]^x[5]^x[6]^x[7]^x[12]^x[13]^x[14]^x[15]^...
+   ...
+   p[bits-1] = ...
+
+---along with p[bits] = x[0]^x[1]^x[2]^x[3]^x[4]^x[5]^x[6]^x[7]^...
+
+This involves Theta(n log n) operations as written (and as implemented
+straightforwardly in parity.py), but is easily improved to Theta(n) by
+common-subexpression elimination. As an example of such elimination,
+Theta(n) operations suffice to produce the 32 values
+
+   x[0]^x[32]^x[64]^x[96]^...
+   x[1]^x[33]^x[65]^x[97]^...
+   ...
+   x[31]^x[63]^x[95]^x[127]^...
+
+and then the values p[0],p[1],p[2],p[3],p[4] and p[bits] are all easily
+extracted with just a few more xors. As another example, Theta(n)
+operations suffice to produce the sums
+
+   x[0]^x[1]^...^x[1023]
+   x[1024]^x[1025]^...^x[2047]
+   ...
+
+which in turn determine the values p[10],p[11],...,p[bits-1].
+
+All of this is easily vectorizable using, e.g., 256-bit vectors. Even
+32-bit integers suffice to make the computations run much more quickly
+than working separately with each 8-bit byte. Care is required on CPUs
+requiring _aligned_ memory access: the input array is not necessarily
+aligned. It is probably worthwhile to move unaligned input arrays to
+aligned positions, either in the caller or within parity().
+
+The current parity.c is designed to be portable C software, but, subject
+to that constraint, organizes the data flow so that it's reasonable to
+imagine a compiler figuring out the desired vectorization. The assembly
+produced by gcc has some vectorization, although it can be improved.
+
+For error correction, here's the usual bitwise extended-Hamming story.
+If there's no error then the parity bits p[0],p[1],...,p[bits-1],p[bits]
+are all 0. If there's a single error then p[0],p[1],...,p[bits-1] show
+the index of the error, while p[bits] is 1. If there's a double error
+then the parity bits p[0],p[1],...,p[bits-1] are nonzero (the xor of the
+two error indices), while p[bits] is 0.
+
+The obvious logarithmic-time way to implement correct() would be to
+extract the error index for the bottom bit of each byte, extract the
+error index for the next bit of each byte, etc. However, as noted above,
+correct() avoids variable array indexing. The indexing is instead
+simulated with logical operations on each byte of the array. The data
+flow here is essentially the transpose of the parity() data flow, and
+correct() is again written in a way that's meant to help the compiler
+figure out the necessary vectorization.
+
+There's also a logarithmic cost to compute the sec and ded flags
+returned to the caller (as sec+256*ded). This could be streamlined as
+follows: skip the "borrow" computation in the software, set "sec" to
+"overall", and set "ded" to "anyp&~overall". However, this would allow
+some _triple_ errors that would otherwise be caught (and reported via
+"ded") to pose as single errors: namely, errors creating out-of-bounds
+indices for array lengths that require truncation of the Hamming code.
+
+The choice of parallelizing across bits of 8-bit words can obviously be
+generalized to parallelizing across bits of b-bit words for any b.
+Different values of b are interoperable in the sense that interleaving
+(b/8) 8-bit-encoded arrays would produce a b-bit encoded array. Changing
+b from 8 to larger powers of 2 would simplify vectorized software in
+various ways. However, there would be some extra complications for
+handling bytes at the end if the input is not guaranteed to have an
+appropriate size, and some extra complications for alignment if the
+input is not guaranteed to have whatever alignment the CPU needs.
