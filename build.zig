@@ -23,4 +23,14 @@ pub fn build(b: *std.build.Builder) void {
             "expand.c", "parity.c", "fill.c", "correct.c", "shrink.c", "encode.c", "clean.c", "decode.c",
         }, &.{});
     }
+
+    const exe = b.addExecutable("test", null);
+    exe.setTarget(target);
+    exe.setBuildMode(mode);
+    exe.linkLibrary(static);
+    exe.addCSourceFile("test.c", &.{});
+
+    const test_cmd = exe.run();
+    const test_step = b.step("test", "Run the test app");
+    test_step.dependOn(&test_cmd.step);
 }
