@@ -1,4 +1,9 @@
+The library can be compiled on any supported system with Zig:
+
+zig build -Drelease-safe
+
+The resulting library can then be found in the zig-out/lib/ folder.
+
 On Linux systems, "make" compiles libsecded, runs various tests in C,
 and runs various tests against a simpler Python implementation of the
-same functions. There's no installation script at the moment, but feel
-free to integrate libsecded into your own programs.
+same functions.
